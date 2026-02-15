@@ -12,6 +12,7 @@ from typing import List, Dict
 from document_processor import DocumentProcessor
 from embedding_engine import EmbeddingEngine
 from vector_store import VectorStore
+from graph_engine import GraphEngine
 
 # ==============================
 # DEBUG + SAFETY UTILITIES
@@ -80,7 +81,9 @@ class RAGEngineOllama:
         collection_name: str = "rag_documents",
         model: str = "llama3:latest",
         ollama_url: str = "http://localhost:11434",
-        n_retrieval_results: int = 3
+        n_retrieval_results: int = 15,
+        use_reranker: bool = True,
+        use_hyde: bool = True
     ):
         # Core components
         self.embedding_engine = EmbeddingEngine()
@@ -91,6 +94,21 @@ class RAGEngineOllama:
         self.model = model
         self.ollama_url = ollama_url
         self.n_retrieval_results = n_retrieval_results
+        self.use_hyde = use_hyde
+        
+        # Graph Engine
+        self.graph_engine = GraphEngine(ollama_url=ollama_url)
+        
+        # Reranker
+        self.use_reranker = use_reranker
+        if self.use_reranker:
+            try:
+                from flashrank import Ranker
+                self.ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="/tmp/flashrank")
+                print("✅ FlashRank Reranker initialized!")
+            except Exception as e:
+                print(f"⚠️ Could not init FlashRank: {e}. Falling back to standard retrieval.")
+                self.use_reranker = False
 
         # STRONG SYSTEM PROMPT (ANTI-HALLUCINATION)
         self.system_prompt = """
@@ -107,41 +125,44 @@ STRICT RULES:
 You must stay fully grounded in the context.
 """
 
-        self._test_ollama()
-        print("✅ RAG Engine (Ollama + Debug Mode) initialized!")
+        self._ensure_model_exists()
+        print("✅ RAG Engine (VANTAGE Optimized) initialized!")
 
-    def _test_ollama(self):
+    def _ensure_model_exists(self):
+        """Check if model exists in Ollama, pull if not"""
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
-            if response.status_code != 200:
-                raise Exception(f"Ollama returned status {response.status_code}")
-            print("🟢 Ollama server connected successfully")
+            tags = response.json().get('models', [])
+            model_names = [m['name'] for m in tags]
+            
+            if self.model not in model_names and f"{self.model}:latest" not in model_names:
+                print(f"📥 Pulling model {self.model} (this may take a few minutes)...")
+                requests.post(f"{self.ollama_url}/api/pull", json={"name": self.model})
+            else:
+                print(f"🟢 Ollama model {self.model} is ready")
         except Exception as e:
-            raise Exception(f"❌ Cannot connect to Ollama: {e}\nMake sure Ollama is running!")
+            print(f"⚠️ Could not verify Ollama model: {e}")
 
-    # ==============================
-    # INDEXING
-    # ==============================
-
-    def index_document(self, pdf_path: str):
+    def index_document(self, file_path: str, chunk_method: str = "fixed"):
         print(f"\n{'='*60}")
-        print(f"📚 INDEXING: {pdf_path}")
+        print(f"📚 INDEXING: {file_path} ({chunk_method})")
         print(f"{'='*60}")
 
-        processor = DocumentProcessor(chunk_size=300, chunk_overlap=80)
-        chunks = processor.process_document(pdf_path)
+        processor = DocumentProcessor(chunk_size=500, chunk_overlap=100)
+        chunks = processor.process_document(file_path, chunk_method=chunk_method)
 
         chunk_texts = [chunk["content"] for chunk in chunks]
         embeddings = self.embedding_engine.embed_batch(chunk_texts)
 
         self.vector_store.add_documents(chunks=chunks, embeddings=embeddings)
-
-        print(f"\n✅ Document indexed!")
-        print(f"📊 Total chunks in DB: {self.vector_store.collection.count()}")
-
-    # ==============================
-    # RETRIEVAL
-    # ==============================
+        
+        # Graph Extraction
+        print("🔗 Extracting Relationships for GraphRAG...")
+        for chunk in chunks[:10]: # Limit to first 10 for performance
+            triplets = self.graph_engine.extract_triplets(chunk['content'], model=self.model)
+            self.graph_engine.add_to_graph(triplets, source=file_path)
+            
+        print(f"\n✅ Document indexed (Vector + Graph)!")
 
     def retrieve_context(self, query: str) -> List[Dict]:
         results = self.vector_store.search(query, n_results=self.n_retrieval_results)
@@ -149,6 +170,7 @@ You must stay fully grounded in the context.
         retrieved_chunks = []
         for i in range(len(results['documents'][0])):
             chunk = {
+                'id': i,
                 'content': results['documents'][0][i],
                 'metadata': results['metadatas'][0][i],
                 'distance': results['distances'][0][i],
@@ -156,113 +178,112 @@ You must stay fully grounded in the context.
             }
             retrieved_chunks.append(chunk)
 
-        return retrieved_chunks
+        if self.use_reranker and len(retrieved_chunks) > 1:
+            print(f"⚖️ Reranking {len(retrieved_chunks)} chunks...")
+            formatted_passages = [
+                {"id": i, "text": c["content"], "meta": c["metadata"]} 
+                for i, c in enumerate(retrieved_chunks)
+            ]
+            
+            from flashrank import RerankRequest
+            rank_request = RerankRequest(query=query, passages=formatted_passages)
+            reranked_results = self.ranker.rerank(rank_request)
+            
+            final_chunks = []
+            for r in reranked_results[:5]:
+                final_chunks.append({
+                    'content': r['text'],
+                    'metadata': r['meta'],
+                    'relevance_score': r['score']
+                })
+            return final_chunks
 
-    def debug_retrieval(self, query: str):
-        results = self.vector_store.search(query, n_results=5)
-
-        print("\n================ RETRIEVAL DEBUG ================\n")
-        print(f"Query: {query}\n")
-
-        for i, chunk in enumerate(results['documents'][0]):
-            relevance = 1 - results['distances'][0][i]
-            print(f"Rank {i+1} | Relevance: {relevance:.3f}")
-            print(chunk[:250])
-            print("-"*60)
-
-        top_score = 1 - results['distances'][0][0]
-        if top_score < 0.5:
-            print("\n⚠️ WARNING: Poor retrieval quality detected!")
-
-    # ==============================
-    # GENERATION
-    # ==============================
+        return retrieved_chunks[:5]
 
     def generate_answer(self, prompt: str) -> Dict:
         data = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "temperature": 0.0,   # 🔥 deterministic
-                "num_predict": 500
-            }
+            "options": {"temperature": 0.1, "num_predict": 800}
         }
+        try:
+            response = requests.post(f"{self.ollama_url}/api/generate", json=data, timeout=180)
+            if response.status_code == 200:
+                result = response.json()
+                return {'answer': result.get('response', '').strip(), 'model': self.model}
+            else:
+                raise Exception(f"Ollama error: {response.status_code}")
+        except Exception as e:
+            return {'answer': f"Error generating answer: {e}", 'model': self.model}
 
-        response = requests.post(
-            f"{self.ollama_url}/api/generate",
-            json=data,
-            timeout=120
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            return {
-                'answer': result.get('response', '').strip(),
-                'model': self.model,
-                'cost': 0.0
-            }
-        else:
-            raise Exception(f"❌ Ollama error: {response.status_code} | {response.text}")
-
-    # ==============================
-    # FULL PIPELINE
-    # ==============================
+    def generate_hyde_passage(self, question: str) -> str:
+        """
+        Generate a hypothetical answer to the question for better retrieval.
+        """
+        print(f"🧠 Generating HyDE passage for: '{question}'")
+        prompt = f"Write a paragraph that could serve as a direct, technical answer to the following question: {question}. Provide only the answer text, no introduction."
+        
+        result = self.generate_answer(prompt)
+        return result['answer']
 
     def query(self, question: str, verbose: bool = True) -> Dict:
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"❓ QUESTION: {question}")
-            print(f"{'='*60}")
+            print(f"\n❓ QUESTION: {question}")
 
-        # Retrieve
-        if verbose:
-            print("\n🔍 Retrieving context...")
+        # HyDE Query Expansion
+        search_query = question
+        if self.use_hyde:
+            search_query = self.generate_hyde_passage(question)
+            if verbose:
+                print(f"🔍 Searching with HyDE Expansion: {search_query[:100]}...")
 
-        chunks = self.retrieve_context(question)
+        chunks = self.retrieve_context(search_query)
+        
+        # Safety check: if no chunks found
+        if not chunks:
+            return {
+                'answer': "I don't have any documents indexed yet. Please upload and index a document first.",
+                'sources': [],
+                'metadata': {}
+            }
 
-        if verbose:
-            print(f"✅ Retrieved {len(chunks)} chunks")
+        # Graph Enhancement
+        graph_context = []
+        # Attempt to find related nodes for key terms
+        for word in question.split():
+            if len(word) > 4: # Simple heuristic for entities
+                rels = self.graph_engine.search_relationships(word)
+                graph_context.extend(rels)
+        
+        graph_str = "\n".join(graph_context[:5]) if graph_context else "None"
 
-        # DEBUG RETRIEVAL
-        self.debug_retrieval(question)
-
-        # CONTEXT CONTROL
-        chunks = check_context_size(chunks, limit=1800)
-
-        # BUILD CONTEXT
+        chunks = check_context_size(chunks, limit=2500)
         context_str = build_context(chunks)
 
         full_prompt = f"""{self.system_prompt}
 
-Context:
+Document Context:
 {context_str}
+
+Knowledge Graph Context:
+{graph_str}
 
 Question: {question}
 
 Answer:"""
 
-        # Generate
-        if verbose:
-            print("\n🤖 Generating answer...")
-
         result = self.generate_answer(full_prompt)
-
+        
         # VALIDATION
         valid, msg = validate_answer(result['answer'], chunks)
-        print(msg)
-
-        # SAFETY GUARD
         final_answer = rag_guard(result['answer'], chunks)
-
-        if verbose:
-            print(f"\n💡 ANSWER:\n{final_answer}")
-            print(f"\n💰 Cost: $0.00 (FREE!)")
 
         return {
             'answer': final_answer,
             'sources': chunks,
-            'metadata': result
+            'metadata': {**result, 'hyde_expanded': self.use_hyde},
+            'grounded': valid
         }
 
 

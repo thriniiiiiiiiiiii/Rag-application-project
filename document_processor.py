@@ -6,7 +6,7 @@ This is the first step in the indexing phase
 import os
 from typing import List, Dict
 from PyPDF2 import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 
 class DocumentProcessor:
@@ -43,15 +43,7 @@ class DocumentProcessor:
         )
     
     def load_pdf(self, pdf_path: str) -> str:
-        """
-        Extract text from PDF file
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            Complete text from all pages
-        """
+        """Extract text from PDF file"""
         print(f"📄 Loading PDF: {pdf_path}")
         
         if not os.path.exists(pdf_path):
@@ -60,45 +52,75 @@ class DocumentProcessor:
         try:
             reader = PdfReader(pdf_path)
             text = ""
-            
-            # Extract text from each page
-            for page_num, page in enumerate(reader.pages):
-                page_text = page.extract_text()
-                text += page_text + "\n"
-                
-                # Show progress for large PDFs
-                if (page_num + 1) % 10 == 0:
-                    print(f"   Processed {page_num + 1} pages...")
-            
-            print(f"✅ Loaded {len(reader.pages)} pages")
-            print(f"📊 Total characters: {len(text):,}")
-            
+            for page in reader.pages:
+                text += (page.extract_text() or "") + "\n"
             return text
-            
         except Exception as e:
             raise Exception(f"Error loading PDF: {str(e)}")
+
+    def load_docx(self, docx_path: str) -> str:
+        """Extract text from DOCX file"""
+        from docx import Document
+        print(f"📄 Loading DOCX: {docx_path}")
+        
+        try:
+            doc = Document(docx_path)
+            return "\n".join([para.text for para in doc.paragraphs])
+        except Exception as e:
+            raise Exception(f"Error loading DOCX: {str(e)}")
+
+    def load_text(self, file_path: str) -> str:
+        """Extract text from TXT or MD file"""
+        print(f"📄 Loading Text/MD: {file_path}")
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        except Exception as e:
+            raise Exception(f"Error loading text file: {str(e)}")
     
-    def create_chunks(self, text: str, source_name: str) -> List[Dict]:
+    def semantic_split(self, text: str, threshold: float = 0.6) -> List[str]:
         """
-        Split text into chunks with metadata
+        Split text based on semantic topic shifts rather than fixed size.
+        """
+        import re
+        from sklearn.metrics.pairwise import cosine_similarity
+        from sentence_transformers import SentenceTransformer
         
-        Args:
-            text: Full document text
-            source_name: Name of source document
+        # 1. Split into sentences
+        sentences = re.split(r'(?<=[.!?]) +', text)
+        if len(sentences) < 2:
+            return [text]
+
+        # 2. Get embeddings for sentences
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        embeddings = model.encode(sentences)
+        
+        # 3. Calculate similarities between adjacent sentences
+        chunks = []
+        current_chunk = [sentences[0]]
+        
+        for i in range(len(sentences) - 1):
+            sim = cosine_similarity([embeddings[i]], [embeddings[i+1]])[0][0]
             
-        Returns:
-            List of chunks with metadata
-        """
-        print(f"\n✂️  Creating chunks...")
-        print(f"   Chunk size: {self.chunk_size} characters")
-        print(f"   Chunk overlap: {self.chunk_overlap} characters")
+            if sim < threshold:
+                # Topic shift detected
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [sentences[i+1]]
+            else:
+                current_chunk.append(sentences[i+1])
         
-        # Split the text
-        raw_chunks = self.text_splitter.split_text(text)
+        chunks.append(" ".join(current_chunk))
+        return chunks
+
+    def create_chunks(self, text: str, source_name: str, method: str = "fixed") -> List[Dict]:
+        """Split text into chunks with metadata (Fixed or Semantic)"""
+        print(f"\n✂️  Creating chunks ({method}) for: {source_name}")
         
-        print(f"✅ Created {len(raw_chunks)} chunks")
+        if method == "semantic":
+            raw_chunks = self.semantic_split(text)
+        else:
+            raw_chunks = self.text_splitter.split_text(text)
         
-        # Add metadata to each chunk
         chunks = []
         for i, chunk_text in enumerate(raw_chunks):
             chunk = {
@@ -106,36 +128,30 @@ class DocumentProcessor:
                 "metadata": {
                     "source": source_name,
                     "chunk_id": i,
-                    "char_count": len(chunk_text)
+                    "char_count": len(chunk_text),
+                    "method": method
                 }
             }
             chunks.append(chunk)
         
-        # Show statistics
-        char_counts = [c["metadata"]["char_count"] for c in chunks]
-        print(f"\n📊 Chunk Statistics:")
-        print(f"   Average chars per chunk: {sum(char_counts) / len(char_counts):.0f}")
-        print(f"   Min chars: {min(char_counts)}")
-        print(f"   Max chars: {max(char_counts)}")
-        
+        print(f"✅ Created {len(chunks)} chunks")
         return chunks
     
-    def process_document(self, pdf_path: str) -> List[Dict]:
-        """
-        Complete pipeline: Load PDF → Create Chunks
+    def process_document(self, file_path: str, chunk_method: str = "fixed") -> List[Dict]:
+        """Complete pipeline: Load File → Create Chunks"""
+        filename = os.path.basename(file_path)
+        ext = filename.lower().split('.')[-1]
         
-        This is the main method you'll use
-        """
-        # Extract filename for metadata
-        filename = os.path.basename(pdf_path)
+        if ext == 'pdf':
+            text = self.load_pdf(file_path)
+        elif ext == 'docx':
+            text = self.load_docx(file_path)
+        elif ext in ['txt', 'md']:
+            text = self.load_text(file_path)
+        else:
+            raise ValueError(f"Unsupported file format: {ext}")
         
-        # Load PDF text
-        text = self.load_pdf(pdf_path)
-        
-        # Create chunks
-        chunks = self.create_chunks(text, filename)
-        
-        return chunks
+        return self.create_chunks(text, filename, method=chunk_method)
 
 
 # Test the processor

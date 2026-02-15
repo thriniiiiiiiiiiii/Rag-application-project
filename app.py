@@ -1,486 +1,227 @@
-"""
-RAG Application - Streamlit Interface
-Upload documents and ask questions using AI-powered retrieval
-"""
-
 import streamlit as st
-import os
 from pathlib import Path
-import sys
+import json
+import os
 
-# Import your RAG components
-from rag_engine import RAGEngine
+# =========================
+# IMPORT BACKEND COMPONENTS
+# =========================
+from rag_engine import RAGEngineOllama
 from document_processor import DocumentProcessor
 
-# ============================================================================
-# PAGE CONFIGURATION (Must be the FIRST Streamlit command)
-# ============================================================================
+# =========================
+# PAGE CONFIG
+# =========================
 st.set_page_config(
-    page_title="RAG Document Q&A",
-    page_icon="📚",
-    layout="wide",  # Use full width
-    initial_sidebar_state="expanded"  # Sidebar open by default
+    page_title="VANTAGE - Intelligence OS",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ============================================================================
-# CUSTOM CSS FOR PROFESSIONAL STYLING
-# ============================================================================
+# =========================
+# PREMIUM STYLING (VANTAGE)
+# =========================
 st.markdown("""
 <style>
-    /* Main header styling */
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono&display=swap');
+    
+    :root {
+        --vantage-blue: #00f2ff;
+        --vantage-glass: rgba(15, 23, 42, 0.8);
+        --vantage-border: rgba(0, 242, 255, 0.2);
+    }
+
+    .stApp {
+        background: radial-gradient(circle at top right, #0a192f, #020617);
+        color: #e2e8f0;
+        font-family: 'Outfit', sans-serif;
+    }
+
     .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
+        font-size: 3rem;
+        font-weight: 600;
+        letter-spacing: -1px;
+        background: linear-gradient(90deg, #fff, #00f2ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
         margin-bottom: 0.5rem;
-        text-align: center;
     }
-    
-    /* Subheader styling */
+
     .sub-header {
-        font-size: 1.2rem;
-        color: #666;
-        margin-bottom: 2rem;
         text-align: center;
+        color: #94a3b8;
+        font-size: 1.1rem;
+        margin-bottom: 2rem;
+        font-family: 'JetBrains Mono', monospace;
     }
-    
-    /* Answer box styling */
-    .answer-box {
-        background: linear-gradient(135deg, #e8f4f8 0%, #f0f8ff 100%);
+
+    .stButton>button {
+        background: linear-gradient(135deg, rgba(0, 242, 255, 0.1), rgba(0, 242, 255, 0.05));
+        border: 1px solid var(--vantage-border);
+        color: var(--vantage-blue);
+        border-radius: 8px;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .stButton>button:hover {
+        background: rgba(0, 242, 255, 0.15);
+        border-color: var(--vantage-blue);
+        box-shadow: 0 0 20px rgba(0, 242, 255, 0.2);
+    }
+
+    .chat-card {
+        background: var(--vantage-glass);
+        border: 1px solid var(--vantage-border);
+        border-radius: 12px;
         padding: 1.5rem;
-        border-radius: 0.75rem;
-        border-left: 5px solid #1f77b4;
-        margin: 1rem 0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+        backdrop-filter: blur(12px);
     }
-    
-    /* Source box styling */
-    .source-box {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 0.5rem 0;
-        border-left: 3px solid #28a745;
-    }
-    
-    /* Metric cards */
-    .metric-card {
-        background-color: #ffffff;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        margin: 0.5rem 0;
-    }
-    
-    /* Success message */
-    .success-message {
-        background-color: #d4edda;
-        color: #155724;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #28a745;
-    }
-    
-    /* Error message */
-    .error-message {
-        background-color: #f8d7da;
-        color: #721c24;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #dc3545;
-    }
-    
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* Sidebar styling */
-    section[data-testid="stSidebar"] {
-        background-color: #f8f9fa;
+
+    .source-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        background: rgba(0, 242, 255, 0.1);
+        border: 1px solid var(--vantage-border);
+        border-radius: 4px;
+        font-size: 0.75rem;
+        color: var(--vantage-blue);
+        margin-right: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================================
-# SESSION STATE INITIALIZATION
-# Session state persists data across Streamlit reruns
-# ============================================================================
+# =========================
+# SESSION & PERSISTENCE
+# =========================
+HISTORY_FILE = "chat_history.json"
 
-# Initialize RAG engine (None until first document is indexed)
-if 'rag_engine' not in st.session_state:
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f)
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = load_history()
+
+if "rag_engine" not in st.session_state:
     st.session_state.rag_engine = None
 
-# Chat history storage
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
-
-# List of indexed document names
-if 'documents_indexed' not in st.session_state:
+if "documents_indexed" not in st.session_state:
     st.session_state.documents_indexed = []
 
-# Total cost tracker
-if 'total_cost' not in st.session_state:
-    st.session_state.total_cost = 0.0
-
-# Total tokens used
-if 'total_tokens' not in st.session_state:
-    st.session_state.total_tokens = 0
-
-# ============================================================================
-# CREATE DATA DIRECTORY FOR UPLOADS
-# ============================================================================
 DATA_DIR = Path("./data")
 DATA_DIR.mkdir(exist_ok=True)
 
-# ============================================================================
-# HEADER SECTION
-# ============================================================================
-st.markdown('<p class="main-header">📚 RAG Document Q&A System</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Ask questions about your documents using AI-powered retrieval</p>', unsafe_allow_html=True)
+# =========================
+# HEADER
+# =========================
+st.markdown('<div class="main-header">VANTAGE</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">PROXIMITY RADAR | RAG ENGINE | v2.0</div>', unsafe_allow_html=True)
 
-# ============================================================================
-# SIDEBAR: Configuration and Document Upload
-# ============================================================================
+# =========================
+# SIDEBAR
+# =========================
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    
-    # ========================================================================
-    # MODEL SELECTION
-    # ========================================================================
-    st.subheader("🤖 LLM Settings")
-    
-    model_choice = st.selectbox(
-        "Select LLM Model",
-        ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview"],
-        index=0,  # Default to gpt-3.5-turbo
-        help="💡 GPT-3.5: Fast & cheap | GPT-4: More accurate but slower & expensive"
-    )
-    
-    # Show model info
-    model_info = {
-        "gpt-3.5-turbo": "⚡ Fast | 💰 $0.002/1K tokens",
-        "gpt-4": "🎯 Accurate | 💰 $0.03/1K tokens",
-        "gpt-4-turbo-preview": "🚀 Best | 💰 $0.01/1K tokens"
-    }
-    st.caption(model_info.get(model_choice, ""))
+    st.image("https://img.icons8.com/nolan/128/satellite.png", width=100)
+    st.header("⚡ COMMAND CENTER")
+
+    model_name = st.selectbox("Intelligence Model", ["llama3:latest", "mistral", "phi3"])
+    use_rerank = st.toggle("Enable Reranking (FlashRank)", value=True)
+    use_hyde = st.toggle("Enable HyDE (Neural Expansion)", value=True)
+    chunk_method = st.radio("Chunking Strategy", ["fixed", "semantic"], horizontal=True)
     
     st.divider()
     
-    # ========================================================================
-    # RETRIEVAL SETTINGS
-    # ========================================================================
-    st.subheader("🔍 Retrieval Settings")
-    
-    n_results = st.slider(
-        "Number of chunks to retrieve",
-        min_value=1,
-        max_value=10,
-        value=3,
-        help="More chunks = more context but slower and more expensive"
-    )
-    
-    chunk_size = st.slider(
-        "Chunk size (characters)",
-        min_value=200,
-        max_value=1500,
-        value=500,
-        step=100,
-        help="Larger chunks = more context per piece"
-    )
-    
-    chunk_overlap = st.slider(
-        "Chunk overlap (characters)",
-        min_value=0,
-        max_value=200,
-        value=50,
-        step=25,
-        help="Overlap prevents cutting sentences"
-    )
-    
-    st.divider()
-    
-    # ========================================================================
-    # DOCUMENT UPLOAD
-    # ========================================================================
-    st.header("📄 Upload Documents")
-    
-    uploaded_file = st.file_uploader(
-        "Choose a PDF file",
-        type=['pdf'],
-        help="Upload a PDF document to index and ask questions about"
-    )
-    
-    # Show upload instructions
-    if uploaded_file is None:
-        st.info("👆 Upload a PDF to get started")
-    else:
-        # Display file info
-        file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
-        st.success(f"✅ File loaded: {uploaded_file.name}")
-        st.caption(f"Size: {file_size_mb:.2f} MB")
-        
-        # ====================================================================
-        # INDEX BUTTON
-        # ====================================================================
-        if st.button("🔄 Index Document", type="primary", use_container_width=True):
-            # Save uploaded file to disk
+    st.subheader("📄 INGESTION")
+    uploaded_file = st.file_uploader("Drop Intel Files", type=["pdf", "docx", "txt", "md"])
+
+    if uploaded_file:
+        if st.button("🔄 INDEX DOSSIER", use_container_width=True):
             file_path = DATA_DIR / uploaded_file.name
-            
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
-            
-            # Show indexing progress
-            with st.spinner(f"🔄 Indexing {uploaded_file.name}..."):
+
+            with st.spinner("Processing Signal..."):
                 try:
-                    # Initialize RAG engine if this is the first document
                     if st.session_state.rag_engine is None:
-                        st.session_state.rag_engine = RAGEngine(
-                            model=model_choice,
-                            n_retrieval_results=n_results
+                        st.session_state.rag_engine = RAGEngineOllama(
+                            model=model_name,
+                            use_reranker=use_rerank,
+                            use_hyde=use_hyde
                         )
+                    else:
+                        st.session_state.rag_engine.use_hyde = use_hyde
                     
-                    # Index the document with custom chunk settings
-                    st.session_state.rag_engine.index_document(
-                        str(file_path),
-                        chunk_size=chunk_size,
-                        chunk_overlap=chunk_overlap
-                    )
+                    st.session_state.rag_engine.index_document(str(file_path), chunk_method=chunk_method)
                     
-                    # Add to indexed documents list (avoid duplicates)
                     if uploaded_file.name not in st.session_state.documents_indexed:
                         st.session_state.documents_indexed.append(uploaded_file.name)
                     
-                    st.success(f"✅ Successfully indexed {uploaded_file.name}!")
-                    st.balloons()  # Celebration animation!
-                    
+                    st.success("✅ INTEL SECURED")
+                    st.balloons()
                 except Exception as e:
-                    st.error(f"❌ Error indexing document: {str(e)}")
-                    # Show detailed error in expander
-                    with st.expander("🔍 View Error Details"):
-                        st.code(str(e))
-    
-    # ========================================================================
-    # SHOW INDEXED DOCUMENTS
-    # ========================================================================
+                    st.error(f"❌ SIGNAL LOSS: {e}")
+
     if st.session_state.documents_indexed:
         st.divider()
-        st.subheader("📚 Indexed Documents")
-        
-        for i, doc in enumerate(st.session_state.documents_indexed, 1):
-            st.text(f"{i}. ✓ {doc}")
-    
-    # ========================================================================
-    # USAGE STATISTICS
-    # ========================================================================
-    if st.session_state.total_tokens > 0:
-        st.divider()
-        st.subheader("📊 Usage Statistics")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Total Tokens", f"{st.session_state.total_tokens:,}")
-        with col2:
-            st.metric("Total Cost", f"${st.session_state.total_cost:.4f}")
-    
-    # ========================================================================
-    # CLEAR ALL DATA BUTTON
-    # ========================================================================
-    st.divider()
-    
-    if st.button("🗑️ Clear All Data", type="secondary", use_container_width=True):
-        # Confirm before clearing
+        st.subheader("📚 ARCHIVE")
+        for doc in st.session_state.documents_indexed:
+            st.caption(f"✓ {doc}")
+
+    if st.button("🗑️ PURGE ALL", use_container_width=True):
         st.session_state.rag_engine = None
         st.session_state.chat_history = []
         st.session_state.documents_indexed = []
-        st.session_state.total_cost = 0.0
-        st.session_state.total_tokens = 0
-        st.success("✅ All data cleared!")
-        st.rerun()  # Refresh the app
+        if os.path.exists(HISTORY_FILE):
+                os.remove(HISTORY_FILE)
+        st.rerun()
 
-# ============================================================================
-# MAIN AREA: Chat Interface
-# ============================================================================
+# =========================
+# CHAT INTERFACE
+# =========================
+for chat in st.session_state.chat_history:
+    with st.chat_message("user"):
+        st.markdown(chat["question"])
+    with st.chat_message("assistant"):
+        st.markdown(f'<div class="chat-card">{chat["answer"]}</div>', unsafe_allow_html=True)
+        if chat.get("sources"):
+             with st.expander("🔍 ANALYSIS SOURCES"):
+                 for src in chat["sources"]:
+                     st.markdown(f"""
+                     <div style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 5px; margin-bottom: 5px;">
+                        <span class="source-pill">{src['metadata'].get('source', 'Unknown')}</span>
+                        <p style="font-size: 0.9rem; margin-top: 5px;">{src['content'][:250]}...</p>
+                     </div>
+                     """, unsafe_allow_html=True)
 
-st.header("💬 Ask Questions")
+if question := st.chat_input("Input intelligence query..."):
+    with st.chat_message("user"):
+        st.markdown(question)
 
-# ============================================================================
-# DISPLAY CHAT HISTORY
-# ============================================================================
-for i, chat in enumerate(st.session_state.chat_history):
-    # User question
-    with st.chat_message("user", avatar="👤"):
-        st.write(chat['question'])
-    
-    # Assistant answer
-    with st.chat_message("assistant", avatar="🤖"):
-        # Display answer in styled box
-        st.markdown(
-            f'<div class="answer-box">{chat["answer"]}</div>',
-            unsafe_allow_html=True
-        )
-        
-        # ====================================================================
-        # SOURCES EXPANDER
-        # ====================================================================
-        with st.expander("📖 View Sources & Context"):
-            for j, source in enumerate(chat['sources'], 1):
-                relevance_pct = source['relevance_score'] * 100
+    with st.chat_message("assistant"):
+        if st.session_state.rag_engine:
+            with st.spinner("Decoding..."):
+                result = st.session_state.rag_engine.query(question)
+                st.markdown(f'<div class="chat-card">{result["answer"]}</div>', unsafe_allow_html=True)
                 
-                # Color code by relevance
-                if relevance_pct >= 70:
-                    relevance_color = "🟢"
-                elif relevance_pct >= 50:
-                    relevance_color = "🟡"
-                else:
-                    relevance_color = "🔴"
-                
-                st.markdown(f"""
-                <div class="source-box">
-                    <strong>{relevance_color} Source {j}</strong> 
-                    (Relevance: {relevance_pct:.1f}%)<br>
-                    <em>📄 {source['metadata']['source']} - Chunk {source['metadata']['chunk_id']}</em><br>
-                    <hr style="margin: 0.5rem 0;">
-                    <p style="margin-top: 0.5rem;">{source['content'][:400]}...</p>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        # ====================================================================
-        # METADATA EXPANDER
-        # ====================================================================
-        with st.expander("ℹ️ Response Details"):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Model", chat['metadata']['model'])
-            with col2:
-                st.metric("Tokens", f"{chat['metadata']['tokens_used']:,}")
-            with col3:
-                st.metric("Cost", f"${chat['metadata']['cost']:.6f}")
-
-# ============================================================================
-# QUESTION INPUT
-# ============================================================================
-if st.session_state.rag_engine is not None:
-    # Chat input at the bottom
-    question = st.chat_input(
-        "💭 Ask a question about your documents...",
-        key="user_input"
-    )
-    
-    if question:
-        # ====================================================================
-        # DISPLAY USER QUESTION IMMEDIATELY
-        # ====================================================================
-        with st.chat_message("user", avatar="👤"):
-            st.write(question)
-        
-        # ====================================================================
-        # GENERATE ANSWER
-        # ====================================================================
-        with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("🤔 Thinking..."):
-                try:
-                    # Query the RAG engine
-                    result = st.session_state.rag_engine.query(
-                        question,
-                        verbose=False  # Don't print to console
-                    )
-                    
-                    # Display answer
-                    st.markdown(
-                        f'<div class="answer-box">{result["answer"]}</div>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    # Update usage statistics
-                    st.session_state.total_tokens += result['metadata']['tokens_used']
-                    st.session_state.total_cost += result['metadata']['cost']
-                    
-                    # ========================================================
-                    # SOURCES EXPANDER
-                    # ========================================================
-                    with st.expander("📖 View Sources & Context"):
-                        for j, source in enumerate(result['sources'], 1):
-                            relevance_pct = source['relevance_score'] * 100
-                            
-                            if relevance_pct >= 70:
-                                relevance_color = "🟢"
-                            elif relevance_pct >= 50:
-                                relevance_color = "🟡"
-                            else:
-                                relevance_color = "🔴"
-                            
-                            st.markdown(f"""
-                            <div class="source-box">
-                                <strong>{relevance_color} Source {j}</strong> 
-                                (Relevance: {relevance_pct:.1f}%)<br>
-                                <em>📄 {source['metadata']['source']} - Chunk {source['metadata']['chunk_id']}</em><br>
-                                <hr style="margin: 0.5rem 0;">
-                                <p style="margin-top: 0.5rem;">{source['content'][:400]}...</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                    
-                    # ========================================================
-                    # METADATA EXPANDER
-                    # ========================================================
-                    with st.expander("ℹ️ Response Details"):
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Model", result['metadata']['model'])
-                        with col2:
-                            st.metric("Tokens", f"{result['metadata']['tokens_used']:,}")
-                        with col3:
-                            st.metric("Cost", f"${result['metadata']['cost']:.6f}")
-                    
-                    # ========================================================
-                    # ADD TO CHAT HISTORY
-                    # ========================================================
-                    st.session_state.chat_history.append({
-                        'question': question,
-                        'answer': result['answer'],
-                        'sources': result['sources'],
-                        'metadata': result['metadata']
-                    })
-                    
-                except Exception as e:
-                    st.error(f"❌ Error generating answer: {str(e)}")
-                    
-                    # Show detailed error
-                    with st.expander("🔍 View Error Details"):
-                        st.code(str(e))
-                        import traceback
-                        st.code(traceback.format_exc())
-
-else:
-    # ========================================================================
-    # NO DOCUMENTS INDEXED YET
-    # ========================================================================
-    st.info("""
-    ### 👋 Welcome to RAG Document Q&A!
-    
-    **To get started:**
-    1. 👈 Upload a PDF document in the sidebar
-    2. ⚙️ Adjust settings if needed (optional)
-    3. 🔄 Click "Index Document"
-    4. 💬 Start asking questions!
-    
-    **Example questions you can ask:**
-    - "What is this document about?"
-    - "Summarize the main points"
-    - "What does section 3 discuss?"
-    """)
-
-# ============================================================================
-# FOOTER
-# ============================================================================
-st.divider()
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.caption("🚀 Built with Streamlit")
-with col2:
-    st.caption("🤖 Powered by OpenAI")
-with col3:
-    st.caption("🔍 Vector Search by ChromaDB")
+                new_chat = {
+                    "question": question,
+                    "answer": result["answer"],
+                    "sources": result["sources"]
+                }
+                st.session_state.chat_history.append(new_chat)
+                save_history(st.session_state.chat_history)
+                st.rerun() # Refresh to show in history layout
+        else:
+            st.warning("⚠️ PROXIMITY SENSOR OFFLINE. Please index a document.")

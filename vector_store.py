@@ -140,11 +140,32 @@ class VectorStore:
         return self.collection.get()
 
 
-# ------------------ TEST ------------------
+    def debug_retrieval(self, query: str, n_results: int = 5):
+        """
+        Print detailed retrieval information for debugging
+        """
+        results = self.search(query, n_results=n_results)
+
+        print("\n================ RETRIEVAL DEBUG ================\n")
+        print(f"Query: {query}\n")
+
+        for i, doc in enumerate(results['documents'][0]):
+            distance = results['distances'][0][i]
+            relevance = 1 - distance
+            print(f"Rank {i+1} | Relevance: {relevance:.3f} | Distance: {distance:.3f}")
+            print(doc[:250])
+            print("-" * 60)
+
+        top_score = 1 - results['distances'][0][0]
+        if top_score < 0.5:
+            print("\n⚠️ WARNING: Poor retrieval quality detected!")
+
+    print("\n✅ Vector store test complete!")
+
 if __name__ == "__main__":
-    print("="*70)
+    print("=" * 70)
     print("🧪 TESTING VECTOR STORE")
-    print("="*70)
+    print("=" * 70)
 
     store = VectorStore(persist_directory="./test_vector_db")
     store.create_collection("test_collection")
@@ -167,14 +188,8 @@ if __name__ == "__main__":
     store.add_documents(test_chunks)
 
     print("\n🔍 Testing search...")
-    results = store.search("What is RAG?", n_results=2)
-
-    for i, doc in enumerate(results["documents"][0]):
-        print(f"\nResult {i+1}:")
-        print("Text:", doc)
-        print("Metadata:", results["metadatas"][0][i])
-        print("Distance:", results["distances"][0][i])
+    query = "What is RAG?"
+    store.debug_retrieval(query)
 
     store.delete_collection("test_collection")
-
     print("\n✅ Vector store test complete!")
